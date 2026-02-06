@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>meloetta</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0a0a; color: #ccc; font-family: monospace; font-size: 14px; height: 100vh; display: flex; flex-direction: column; }
+a { color: #888; text-decoration: none; }
+a:hover { color: #fff; }
+button { background: #1a1a1a; color: #ccc; border: 1px solid #333; padding: 6px 14px; font-family: monospace; font-size: 14px; cursor: pointer; min-height: 44px; }
+button:hover { background: #252525; color: #fff; }
+
+#app { display: flex; flex-direction: column; height: 100vh; }
+
+/* list view */
+.list-header { padding: 16px; border-bottom: 1px solid #1a1a1a; display: flex; justify-content: space-between; align-items: center; }
+.list-header h1 { font-size: 14px; font-weight: normal; color: #666; }
+.session-list { flex: 1; overflow-y: auto; }
+.session-item { padding: 12px 16px; border-bottom: 1px solid #111; cursor: pointer; display: flex; justify-content: space-between; align-items: center; min-height: 44px; gap: 12px; }
+.session-item:hover { background: #111; }
+.session-title { color: #aaa; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-info { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.session-cli { color: #555; font-size: 11px; border: 1px solid #222; padding: 1px 5px; }
+.session-cwd { color: #444; font-size: 11px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-meta { color: #444; font-size: 12px; }
+.session-dot { width: 6px; height: 6px; border-radius: 50%; }
+.session-dot.alive { background: #4a4; }
+.session-dot.dead { background: #444; }
+.empty { padding: 40px 16px; color: #333; text-align: center; }
+
+/* chat view */
+.chat-header { padding: 12px 16px; border-bottom: 1px solid #1a1a1a; display: flex; align-items: center; gap: 12px; }
+.chat-header .back { color: #555; cursor: pointer; }
+.chat-header .back:hover { color: #fff; }
+.chat-header .title { color: #666; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-header .cwd { color: #333; font-size: 11px; }
+.messages { flex: 1; overflow-y: auto; padding: 16px; }
+.msg { margin-bottom: 16px; white-space: pre-wrap; word-wrap: break-word; }
+.msg.user { color: #fff; }
+.msg.user::before { content: "> "; color: #444; }
+.msg.assistant { color: #9d9; padding-left: 16px; }
+.msg.streaming { opacity: 0.8; }
+.msg.activity { color: #555; font-size: 12px; padding-left: 16px; margin-bottom: 4px; }
+.msg.activity::before { content: "~ "; color: #333; }
+.input-area { padding: 12px 16px; border-top: 1px solid #1a1a1a; display: flex; gap: 8px; }
+.input-area textarea { flex: 1; background: #111; color: #ccc; border: 1px solid #222; padding: 8px; font-family: monospace; font-size: 14px; resize: none; min-height: 40px; max-height: 200px; }
+.input-area textarea:focus { outline: none; border-color: #444; }
+.input-area textarea:disabled { opacity: 0.4; }
+.status { padding: 4px 16px; color: #333; font-size: 11px; }
+
+/* folder picker */
+.picker-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 10; }
+.picker { background: #111; border: 1px solid #333; width: 500px; max-width: calc(100vw - 32px); max-height: 80vh; display: flex; flex-direction: column; }
+.picker-header { padding: 12px 16px; border-bottom: 1px solid #222; display: flex; justify-content: space-between; align-items: center; }
+.picker-header span { color: #888; }
+.picker-path { padding: 8px 16px; color: #555; font-size: 12px; border-bottom: 1px solid #1a1a1a; display: flex; align-items: center; gap: 8px; }
+.picker-path .cur { color: #aaa; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.picker-entries { flex: 1; overflow-y: auto; max-height: 400px; }
+.picker-entry { padding: 8px 16px; cursor: pointer; color: #888; min-height: 44px; display: flex; align-items: center; }
+.picker-entry:hover { background: #1a1a1a; color: #ccc; }
+.picker-entry::before { content: "/ "; color: #333; }
+.picker-actions { padding: 12px 16px; border-top: 1px solid #222; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.cli-toggle { display: flex; gap: 0; }
+.cli-toggle button { border-radius: 0; border-right: none; }
+.cli-toggle button:first-child { border-radius: 2px 0 0 2px; }
+.cli-toggle button:last-child { border-radius: 0 2px 2px 0; border-right: 1px solid #333; }
+.cli-toggle button.active { background: #333; color: #fff; }
+
+/* mobile */
+@media (max-width: 600px) {
+  .session-item { flex-direction: column; align-items: flex-start; gap: 6px; }
+  .session-info { width: 100%; flex-wrap: wrap; gap: 8px; }
+  .session-cwd { max-width: 100%; }
+  .chat-header { flex-wrap: wrap; gap: 8px; }
+  .chat-header .cwd { width: 100%; order: 10; margin-left: 0; }
+  .chat-header .back { min-width: 44px; min-height: 44px; display: flex; align-items: center; }
+  .messages { padding: 12px; }
+  .msg.assistant { padding-left: 8px; }
+  .msg.activity { padding-left: 8px; }
+  .input-area { padding: 8px 12px; }
+  .input-area textarea { font-size: 16px; }
+  .picker-actions { flex-direction: column; gap: 10px; }
+  .picker-actions .picker-select { width: 100%; }
+}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+const app = document.getElementById("app");
+let ws = null;
+let currentSession = null;
+let streaming = false;
+let streamEl = null;
+let activityEl = null;
+let pickerCli = "claude";
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  ws.onopen = () => route();
+  ws.onmessage = (e) => handle(JSON.parse(e.data));
+  ws.onclose = () => setTimeout(connect, 1000);
+}
+
+function send(msg) { ws.send(JSON.stringify(msg)); }
+
+function route() {
+  // leave previous session if any
+  if (currentSession) {
+    send({ type: "leave", sessionId: currentSession });
+    currentSession = null;
+  }
+  const hash = location.hash || "#/";
+  if (hash.startsWith("#/session/")) {
+    const id = hash.slice(10);
+    openChat(id);
+  } else {
+    showList();
+  }
+}
+
+window.addEventListener("hashchange", route);
+
+// --- List view ---
+function showList() {
+  currentSession = null;
+  send({ type: "list" });
+}
+
+function renderList(sessions) {
+  if (location.hash && location.hash !== "#/") return;
+  app.innerHTML = `
+    <div class="list-header">
+      <h1>meloetta</h1>
+      <button id="create-btn">+ new</button>
+    </div>
+    <div class="session-list" id="slist"></div>
+  `;
+  const list = document.getElementById("slist");
+  if (!sessions.length) {
+    list.innerHTML = '<div class="empty">no sessions</div>';
+  } else {
+    sessions.sort((a, b) => b.createdAt - a.createdAt);
+    list.innerHTML = sessions.map(s => `
+      <div class="session-item" data-id="${s.id}">
+        <span class="session-title">${esc(s.title)}</span>
+        <div class="session-info">
+          <span class="session-cli">${esc(s.cli)}</span>
+          <span class="session-cwd">${esc(s.cwd)}</span>
+          <span class="session-meta">${ago(s.createdAt)}</span>
+          <span class="session-dot ${s.alive ? 'alive' : 'dead'}"></span>
+        </div>
+      </div>
+    `).join("");
+    list.querySelectorAll(".session-item").forEach(el => {
+      el.onclick = () => { location.hash = `#/session/${el.dataset.id}`; };
+    });
+  }
+  document.getElementById("create-btn").onclick = () => openPicker();
+}
+
+// --- Folder picker ---
+function openPicker() {
+  send({ type: "browse" });
+}
+
+function renderPicker(path, entries) {
+  let overlay = document.querySelector(".picker-overlay");
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.className = "picker-overlay";
+    document.body.appendChild(overlay);
+  }
+
+  const isRoot = path === "/";
+  overlay.innerHTML = `
+    <div class="picker">
+      <div class="picker-header">
+        <span>select folder</span>
+        <button class="picker-close">cancel</button>
+      </div>
+      <div class="picker-path">
+        ${isRoot ? '' : '<button class="picker-up">..</button>'}
+        <span class="cur">${esc(path)}</span>
+      </div>
+      <div class="picker-entries">${
+        entries.length
+          ? entries.map(e => `<div class="picker-entry" data-name="${esc(e.name)}">${esc(e.name)}</div>`).join("")
+          : '<div class="empty">empty</div>'
+      }</div>
+      <div class="picker-actions">
+        <div class="cli-toggle">
+          <button class="cli-btn ${pickerCli === 'claude' ? 'active' : ''}" data-cli="claude">claude</button>
+          <button class="cli-btn ${pickerCli === 'codex' ? 'active' : ''}" data-cli="codex">codex</button>
+        </div>
+        <button class="picker-select">start session</button>
+      </div>
+    </div>
+  `;
+
+  overlay.querySelector(".picker-close").onclick = () => overlay.remove();
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+  const upBtn = overlay.querySelector(".picker-up");
+  if (upBtn) {
+    upBtn.onclick = () => {
+      const parent = path.replace(/\/[^/]+\/?$/, "") || "/";
+      send({ type: "browse", path: parent });
+    };
+  }
+
+  overlay.querySelectorAll(".picker-entry").forEach(el => {
+    el.onclick = () => {
+      const sub = path === "/" ? `/${el.dataset.name}` : `${path}/${el.dataset.name}`;
+      send({ type: "browse", path: sub });
+    };
+  });
+
+  overlay.querySelectorAll(".cli-btn").forEach(btn => {
+    btn.onclick = () => {
+      pickerCli = btn.dataset.cli;
+      overlay.querySelectorAll(".cli-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+    };
+  });
+
+  overlay.querySelector(".picker-select").onclick = () => {
+    overlay.remove();
+    send({ type: "create", cwd: path, cli: pickerCli });
+  };
+}
+
+// --- Chat view ---
+function openChat(id) {
+  currentSession = id;
+  streaming = false;
+  streamEl = null;
+  app.innerHTML = `
+    <div class="chat-header">
+      <span class="back" id="back-btn">&larr; back</span>
+      <span class="title" id="chat-title">loading...</span>
+      <span class="session-cli" id="chat-cli"></span>
+      <span class="cwd" id="chat-cwd"></span>
+    </div>
+    <div class="messages" id="msgs"></div>
+    <div class="status" id="status"></div>
+    <div class="input-area">
+      <textarea id="input" rows="1" placeholder="message..."></textarea>
+      <button id="send-btn">send</button>
+    </div>
+  `;
+  document.getElementById("back-btn").onclick = () => { location.hash = "#/"; };
+  const input = document.getElementById("input");
+  const sendBtn = document.getElementById("send-btn");
+  const sendMsg = () => {
+    const text = input.value.trim();
+    if (!text || streaming) return;
+    send({ type: "message", sessionId: currentSession, text });
+    appendMsg("user", text);
+    input.value = "";
+    input.style.height = "auto";
+    streaming = true;
+    streamEl = null;
+    activityEl = null;
+    setStatus("thinking...");
+    input.disabled = true;
+    sendBtn.disabled = true;
+  };
+  sendBtn.onclick = sendMsg;
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMsg(); }
+  });
+  input.addEventListener("input", () => {
+    input.style.height = "auto";
+    input.style.height = input.scrollHeight + "px";
+  });
+  send({ type: "open", sessionId: id });
+}
+
+function appendMsg(role, text) {
+  const msgs = document.getElementById("msgs");
+  if (!msgs) return;
+  const div = document.createElement("div");
+  div.className = `msg ${role}`;
+  div.textContent = text;
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+  return div;
+}
+
+function setStatus(text) {
+  const el = document.getElementById("status");
+  if (el) el.textContent = text;
+}
+
+// --- handle server messages ---
+function handle(msg) {
+  switch (msg.type) {
+    case "sessions":
+      renderList(msg.sessions);
+      break;
+
+    case "created":
+      location.hash = `#/session/${msg.session.id}`;
+      break;
+
+    case "history": {
+      const title = document.getElementById("chat-title");
+      const cwd = document.getElementById("chat-cwd");
+      const cli = document.getElementById("chat-cli");
+      if (title) title.textContent = msg.title || currentSession;
+      if (cwd) cwd.textContent = msg.cwd;
+      if (cli) cli.textContent = msg.cli || "claude";
+      for (const m of msg.messages) appendMsg(m.role, m.text);
+      if (!msg.ready) setStatus(`starting ${msg.cli || "claude"}...`);
+      else if (msg.model) setStatus(msg.model);
+      break;
+    }
+
+    case "ready":
+      setStatus("");
+      break;
+
+    case "activity": {
+      const msgs = document.getElementById("msgs");
+      if (!msgs) break;
+      // reuse or create activity line
+      if (activityEl) {
+        activityEl.textContent = msg.activity;
+      } else {
+        activityEl = document.createElement("div");
+        activityEl.className = "msg activity";
+        activityEl.textContent = msg.activity;
+        msgs.appendChild(activityEl);
+      }
+      msgs.scrollTop = msgs.scrollHeight;
+      setStatus(msg.activity);
+      break;
+    }
+
+    case "chunk": {
+      // once text starts, finalize activity line and start fresh
+      if (activityEl) activityEl = null;
+      if (!streamEl) {
+        streamEl = appendMsg("assistant", "");
+        streamEl.classList.add("streaming");
+      }
+      streamEl.textContent += msg.text;
+      const msgs = document.getElementById("msgs");
+      if (msgs) msgs.scrollTop = msgs.scrollHeight;
+      break;
+    }
+
+    case "done": {
+      if (streamEl) streamEl.classList.remove("streaming");
+      streamEl = null;
+      activityEl = null;
+      streaming = false;
+      const input = document.getElementById("input");
+      const sendBtn = document.getElementById("send-btn");
+      if (input) { input.disabled = false; input.focus(); }
+      if (sendBtn) sendBtn.disabled = false;
+      const parts = [];
+      if (msg.model) parts.push(msg.model);
+      if (msg.costUsd) parts.push(`$${msg.costUsd.toFixed(4)}`);
+      setStatus(parts.join(" · "));
+      break;
+    }
+
+    case "error":
+      setStatus(`error: ${msg.message}`);
+      break;
+
+    case "closed":
+      setStatus("session ended");
+      break;
+
+    case "idle":
+      streaming = false;
+      streamEl = null;
+      activityEl = null;
+      const idleInput = document.getElementById("input");
+      const idleSendBtn = document.getElementById("send-btn");
+      if (idleInput) { idleInput.disabled = false; }
+      if (idleSendBtn) { idleSendBtn.disabled = false; }
+      setStatus("session idle, will resume on next message");
+      break;
+
+    case "browse_result":
+      if (msg.defaults) pickerCli = msg.defaults.cli || "claude";
+      renderPicker(msg.path, msg.entries);
+      break;
+
+    case "deleted":
+      if (location.hash === "#/" || !location.hash) send({ type: "list" });
+      break;
+  }
+}
+
+// --- utils ---
+function esc(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
+function ago(ts) {
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
+connect();
+</script>
+</body>
+</html>
