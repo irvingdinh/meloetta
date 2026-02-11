@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"thread_xyz789","model":"codex-mini-latest"}
+{"type":"item.completed","item":{"type":"reasoning","text":"Let me check the directory"}}
+{"type":"item.started","item":{"type":"command_execution","command":"ls -la"}}
+{"type":"item.completed","item":{"type":"command_execution","command":"ls -la","exit_code":0}}
+{"type":"item.completed","item":{"type":"agent_message","text":"Here are the files in the directory."}}
+{"type":"turn.completed"}

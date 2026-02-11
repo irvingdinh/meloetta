@@ -1,8 +1,167 @@
-import { spawn, type Subprocess } from "bun";
-import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { Rotom, type Session, type CLIType } from "./rotom/src/index.js";
 import index from "./index.html";
+
+// --- Git helpers ---
+
+async function isGitRepo(cwd: string): Promise<boolean> {
+  try {
+    const result = await Bun.$`git -C ${cwd} rev-parse --is-inside-work-tree`.quiet();
+    return result.exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
+interface DiffLine {
+  type: "context" | "addition" | "deletion" | "hunk_header";
+  content: string;
+  oldNum?: number;
+  newNum?: number;
+}
+
+interface DiffHunk {
+  header: string;
+  lines: DiffLine[];
+}
+
+interface DiffFile {
+  path: string;
+  status: "modified" | "added" | "deleted" | "renamed" | "untracked" | "binary";
+  hunks: DiffHunk[];
+  truncated?: boolean;
+}
+
+function parseUnifiedDiff(text: string): DiffFile[] {
+  const files: DiffFile[] = [];
+  const fileSections = text.split(/^diff --git /m).filter(Boolean);
+
+  for (const section of fileSections) {
+    const lines = section.split("\n");
+    // Extract file path from "a/path b/path"
+    const headerMatch = lines[0]?.match(/a\/(.+?) b\/(.+)/);
+    if (!headerMatch) continue;
+
+    const path = headerMatch[2];
+    let status: DiffFile["status"] = "modified";
+
+    // Check for binary
+    if (section.includes("Binary files")) {
+      files.push({ path, status: "binary", hunks: [] });
+      continue;
+    }
+
+    // Check for new/deleted file
+    if (section.includes("new file mode")) status = "added";
+    else if (section.includes("deleted file mode")) status = "deleted";
+    else if (section.includes("rename from")) status = "renamed";
+
+    const hunks: DiffHunk[] = [];
+    let currentHunk: DiffHunk | null = null;
+    let oldNum = 0;
+    let newNum = 0;
+    let lineCount = 0;
+
+    for (const line of lines) {
+      if (line.startsWith("@@")) {
+        const m = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)/);
+        if (m) {
+          oldNum = parseInt(m[1]);
+          newNum = parseInt(m[2]);
+          currentHunk = { header: line, lines: [] };
+          hunks.push(currentHunk);
+        }
+      } else if (currentHunk) {
+        if (lineCount >= 2000) continue;
+        if (line.startsWith("+")) {
+          currentHunk.lines.push({ type: "addition", content: line.slice(1), newNum: newNum++ });
+          lineCount++;
+        } else if (line.startsWith("-")) {
+          currentHunk.lines.push({ type: "deletion", content: line.slice(1), oldNum: oldNum++ });
+          lineCount++;
+        } else if (line.startsWith(" ") || line === "") {
+          // Only push context if inside a hunk and line starts with space
+          if (line.startsWith(" ")) {
+            currentHunk.lines.push({ type: "context", content: line.slice(1), oldNum: oldNum++, newNum: newNum++ });
+            lineCount++;
+          }
+        }
+      }
+    }
+
+    files.push({ path, status, hunks, truncated: lineCount >= 2000 });
+  }
+
+  return files;
+}
+
+async function getGitDiff(cwd: string): Promise<{ files: DiffFile[]; stats: { files: number; additions: number; deletions: number } }> {
+  let diffText = "";
+  try {
+    // Try diff against HEAD first
+    const result = await Bun.$`git -C ${cwd} diff HEAD`.quiet();
+    diffText = result.text();
+  } catch {
+    try {
+      // No HEAD (empty repo) — try cached
+      const result = await Bun.$`git -C ${cwd} diff --cached`.quiet();
+      diffText = result.text();
+    } catch {
+      diffText = "";
+    }
+  }
+
+  const files = parseUnifiedDiff(diffText);
+
+  // Get untracked files
+  try {
+    const untrackedResult = await Bun.$`git -C ${cwd} ls-files --others --exclude-standard`.quiet();
+    const untrackedPaths = untrackedResult.text().trim().split("\n").filter(Boolean);
+
+    for (const filePath of untrackedPaths) {
+      const fullPath = join(cwd, filePath);
+      try {
+        const s = await stat(fullPath);
+        if (s.size > 50 * 1024) {
+          files.push({ path: filePath, status: "untracked", hunks: [], truncated: true });
+          continue;
+        }
+        const content = await readFile(fullPath, "utf-8");
+        const contentLines = content.split("\n");
+        const lines: DiffLine[] = [];
+        const limit = Math.min(contentLines.length, 2000);
+        for (let i = 0; i < limit; i++) {
+          lines.push({ type: "addition", content: contentLines[i], newNum: i + 1 });
+        }
+        files.push({
+          path: filePath,
+          status: "untracked",
+          hunks: lines.length ? [{ header: `@@ -0,0 +1,${limit} @@ new file`, lines }] : [],
+          truncated: contentLines.length > 2000,
+        });
+      } catch {
+        // Binary or unreadable
+        files.push({ path: filePath, status: "untracked", hunks: [] });
+      }
+    }
+  } catch {}
+
+  // Compute stats
+  let additions = 0;
+  let deletions = 0;
+  for (const file of files) {
+    for (const hunk of file.hunks) {
+      for (const line of hunk.lines) {
+        if (line.type === "addition") additions++;
+        else if (line.type === "deletion") deletions++;
+      }
+    }
+  }
+
+  return { files, stats: { files: files.length, additions, deletions } };
+}
 
 const HOST = process.env.HOST || "127.0.0.1";
 const PORT = parseInt(process.env.PORT || "8090");
@@ -24,488 +183,66 @@ async function saveDefaults() {
   await writeFile(DEFAULTS_FILE, JSON.stringify(defaults));
 }
 
-// --- Types ---
+// --- Subscriber management ---
 
-type CLIType = "claude" | "codex";
-
-interface SessionMeta {
-  id: string;
-  title: string;
-  createdAt: number;
-  cwd: string;
-  cli: CLIType;
-  cliSessionId: string | null; // claude session_id or codex thread_id
-  model: string | null;
-  messages: { role: "user" | "assistant"; text: string }[];
-}
-
-type Emitter = (event: string, data?: any) => void;
-
-interface Adapter {
-  send(text: string): void;
-  kill(): void;
-}
-
-interface Session extends SessionMeta {
-  adapter: Adapter | null;
-  subscribers: Set<ServerWebSocket<WsData>>;
-  ready: boolean;
-  lastActivity: number;
-  buffer: string;
-}
-
+type ServerWebSocket<T> = import("bun").ServerWebSocket<T>;
 interface WsData {
   sessionId?: string;
 }
 
-type ServerWebSocket<T> = import("bun").ServerWebSocket<T>;
+const subscribers = new Map<string, Set<ServerWebSocket<WsData>>>();
 
-const sessions = new Map<string, Session>();
-
-function genId(): string {
-  return crypto.randomUUID().slice(0, 8);
-}
-
-// --- Persistence ---
-
-async function ensureDataDir() {
-  await mkdir(DATA_DIR, { recursive: true });
-}
-
-async function saveMeta(session: Session) {
-  const meta: SessionMeta = {
-    id: session.id,
-    title: session.title,
-    createdAt: session.createdAt,
-    cwd: session.cwd,
-    cli: session.cli,
-    cliSessionId: session.cliSessionId,
-    model: session.model,
-    messages: session.messages,
-  };
-  await writeFile(join(DATA_DIR, `${session.id}.json`), JSON.stringify(meta));
-}
-
-async function loadSessions() {
-  await ensureDataDir();
-  try {
-    const files = await readdir(DATA_DIR);
-    for (const f of files) {
-      if (!f.endsWith(".json")) continue;
-      try {
-        const raw = await readFile(join(DATA_DIR, f), "utf-8");
-        const meta: SessionMeta = JSON.parse(raw);
-        sessions.set(meta.id, {
-          ...meta,
-          cli: meta.cli || "claude",
-          model: meta.model || null,
-          adapter: null,
-          subscribers: new Set(),
-          ready: false,
-          lastActivity: Date.now(),
-          buffer: "",
-        });
-      } catch {}
-    }
-  } catch {}
-}
-
-async function deleteMeta(id: string) {
-  try {
-    await rm(join(DATA_DIR, `${id}.json`));
-  } catch {}
-}
-
-// --- Stream reader helper ---
-
-function readLines(
-  proc: Subprocess,
-  onLine: (line: string) => void,
-  onEnd?: () => void
-) {
-  const reader = proc.stdout.getReader();
-  const decoder = new TextDecoder();
-  let partial = "";
-
-  (async () => {
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        partial += decoder.decode(value, { stream: true });
-        const lines = partial.split("\n");
-        partial = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          onLine(line);
-        }
-      }
-    } catch {}
-    onEnd?.();
-  })();
-}
-
-// --- Claude Adapter ---
-
-function summarizeClaudeTool(name: string, input: any): string {
-  if (!input) return name;
-  if (name === "Bash" && input.description) return `${name}: ${input.description}`;
-  if (name === "Bash" && input.command) return `${name}: ${input.command.slice(0, 80)}`;
-  if (name === "Read" && input.file_path) return `${name}: ${input.file_path}`;
-  if (name === "Edit" && input.file_path) return `${name}: ${input.file_path}`;
-  if (name === "Write" && input.file_path) return `${name}: ${input.file_path}`;
-  if (name === "Grep" && input.pattern) return `${name}: ${input.pattern}`;
-  if (name === "Glob" && input.pattern) return `${name}: ${input.pattern}`;
-  if (name === "WebSearch" && input.query) return `${name}: ${input.query}`;
-  if (name === "WebFetch" && input.url) return `${name}: ${input.url}`;
-  if (name === "Task" && input.description) return `${name}: ${input.description}`;
-  return name;
-}
-
-function createClaudeAdapter(session: Session, emit: Emitter): Adapter {
-  const args = [
-    "claude",
-    "-p",
-    "--input-format",
-    "stream-json",
-    "--output-format",
-    "stream-json",
-    "--include-partial-messages",
-    "--verbose",
-    "--dangerously-skip-permissions",
-  ];
-
-  if (session.cliSessionId) {
-    args.push("--resume", session.cliSessionId);
+function getSubscribers(sessionId: string): Set<ServerWebSocket<WsData>> {
+  let set = subscribers.get(sessionId);
+  if (!set) {
+    set = new Set();
+    subscribers.set(sessionId, set);
   }
-
-  const proc = spawn(args, {
-    cwd: session.cwd,
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-
-  readLines(proc, (line) => {
-    try {
-      const data = JSON.parse(line);
-
-      if (data.type === "system" && data.subtype === "init") {
-        if (data.session_id && !session.cliSessionId) {
-          session.cliSessionId = data.session_id;
-        }
-        if (data.model) {
-          session.model = data.model;
-        }
-        saveMeta(session);
-        emit("ready");
-        return;
-      }
-
-      // thinking
-      if (
-        data.type === "stream_event" &&
-        data.event?.type === "content_block_start" &&
-        data.event?.content_block?.type === "thinking"
-      ) {
-        emit("activity", "thinking");
-        return;
-      }
-
-      // tool use started
-      if (
-        data.type === "stream_event" &&
-        data.event?.type === "content_block_start" &&
-        data.event?.content_block?.type === "tool_use"
-      ) {
-        emit("activity", `using ${data.event.content_block.name}...`);
-        return;
-      }
-
-      // full assistant message with tool calls
-      if (data.type === "assistant" && data.message?.content) {
-        for (const block of data.message.content) {
-          if (block.type === "tool_use") {
-            emit("activity", summarizeClaudeTool(block.name, block.input));
-          }
-        }
-        return;
-      }
-
-      // tool result
-      if (data.type === "user" && data.tool_use_result !== undefined) {
-        emit("activity", "done");
-        return;
-      }
-
-      // text delta
-      if (
-        data.type === "stream_event" &&
-        data.event?.type === "content_block_delta" &&
-        data.event?.delta?.type === "text_delta"
-      ) {
-        emit("chunk", data.event.delta.text);
-        return;
-      }
-
-      // turn complete
-      if (data.type === "result") {
-        if (data.model) session.model = data.model;
-        emit("turn_done", { costUsd: data.total_cost_usd, model: session.model });
-        return;
-      }
-    } catch {}
-  });
-
-  return {
-    send(text: string) {
-      const input = JSON.stringify({
-        type: "user",
-        message: { role: "user", content: text },
-      });
-      proc.stdin.write(input + "\n");
-    },
-    kill() {
-      try { proc.kill(); } catch {}
-    },
-  };
+  return set;
 }
 
-// --- Codex Adapter ---
-
-function createCodexAdapter(session: Session, emit: Emitter): Adapter {
-  let currentProc: Subprocess | null = null;
-
-  function spawnTurn(text: string) {
-    const args = ["codex", "exec"];
-
-    if (session.cliSessionId) {
-      // codex exec resume doesn't support -C
-      args.push(
-        "resume",
-        "--json",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--skip-git-repo-check",
-        session.cliSessionId,
-        text,
-      );
-    } else {
-      args.push(
-        "--json",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--skip-git-repo-check",
-        "-C",
-        session.cwd,
-        text,
-      );
-    }
-
-    const proc = spawn(args, {
-      cwd: session.cwd,
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-
-    currentProc = proc;
-
-    readLines(
-      proc,
-      (line) => {
-        try {
-          const data = JSON.parse(line);
-
-          // capture thread_id
-          if (data.type === "thread.started" && data.thread_id) {
-            if (!session.cliSessionId) {
-              session.cliSessionId = data.thread_id;
-            }
-            if (data.model) {
-              session.model = data.model;
-            }
-            saveMeta(session);
-            emit("ready");
-            return;
-          }
-
-          // reasoning/thinking
-          if (
-            data.type === "item.completed" &&
-            data.item?.type === "reasoning"
-          ) {
-            emit("activity", `thinking: ${(data.item.text || "").slice(0, 80)}`);
-            return;
-          }
-
-          // tool started
-          if (
-            data.type === "item.started" &&
-            data.item?.type === "command_execution"
-          ) {
-            emit("activity", `running: ${(data.item.command || "").slice(0, 80)}`);
-            return;
-          }
-
-          // tool completed
-          if (
-            data.type === "item.completed" &&
-            data.item?.type === "command_execution"
-          ) {
-            const status = data.item.exit_code === 0 ? "done" : `exit ${data.item.exit_code}`;
-            emit("activity", status);
-            return;
-          }
-
-          // agent text message (codex sends complete text, not streamed)
-          if (
-            data.type === "item.completed" &&
-            data.item?.type === "agent_message"
-          ) {
-            emit("chunk", data.item.text || "");
-            return;
-          }
-
-          // turn complete
-          if (data.type === "turn.completed") {
-            emit("turn_done", { model: session.model });
-            return;
-          }
-        } catch {}
-      },
-      () => {
-        currentProc = null;
-      }
-    );
-  }
-
-  // codex is ready immediately (process spawns per-turn)
-  emit("ready");
-
-  return {
-    send(text: string) {
-      spawnTurn(text);
-    },
-    kill() {
-      try { currentProc?.kill(); } catch {}
-    },
-  };
-}
-
-// --- Session management ---
-
-function createAdapter(session: Session): Adapter {
-  const emit: Emitter = (event, data) => {
-    switch (event) {
-      case "ready":
-        session.ready = true;
-        broadcast(session, { type: "ready" });
-        break;
-      case "activity":
-        broadcast(session, { type: "activity", activity: data });
-        break;
-      case "chunk":
-        session.buffer += data;
-        broadcast(session, { type: "chunk", text: data });
-        break;
-      case "turn_done":
-        if (session.buffer) {
-          session.messages.push({ role: "assistant", text: session.buffer });
-          if (!session.title) {
-            const firstUser = session.messages.find((m) => m.role === "user");
-            session.title = firstUser?.text.slice(0, 80) || "Untitled";
-          }
-          session.buffer = "";
-          saveMeta(session);
-        }
-        broadcast(session, { type: "done", costUsd: data?.costUsd, model: data?.model });
-        break;
-    }
-  };
-
-  if (session.cli === "codex") {
-    return createCodexAdapter(session, emit);
-  }
-  return createClaudeAdapter(session, emit);
-}
-
-async function createSession(cwd: string, cli: CLIType): Promise<Session> {
-  const id = genId();
-
-  const session: Session = {
-    id,
-    title: "",
-    createdAt: Date.now(),
-    cwd,
-    cli,
-    cliSessionId: null,
-    model: null,
-    messages: [],
-    adapter: null,
-    subscribers: new Set(),
-    ready: false,
-    lastActivity: Date.now(),
-    buffer: "",
-  };
-
-  sessions.set(id, session);
-  session.adapter = createAdapter(session);
-  await saveMeta(session);
-  defaults = { cwd, cli };
-  saveDefaults();
-  return session;
-}
-
-function ensureAdapter(session: Session) {
-  if (!session.adapter) {
-    session.adapter = createAdapter(session);
-  }
-  // for claude, check if the underlying process died
-  if (session.cli === "claude") {
-    // adapter is recreated if needed on send — we just ensure it exists
-  }
-}
-
-function sendMessage(session: Session, text: string) {
-  if (!session.adapter) {
-    session.adapter = createAdapter(session);
-  }
-  session.lastActivity = Date.now();
-  session.messages.push({ role: "user", text });
-  saveMeta(session);
-  session.adapter.send(text);
-}
-
-function sessionInfo(s: Session) {
-  return {
-    id: s.id,
-    title: s.title || "New session",
-    createdAt: s.createdAt,
-    cwd: s.cwd,
-    cli: s.cli,
-    messageCount: s.messages.length,
-    alive: s.adapter !== null,
-  };
-}
-
-async function destroySession(session: Session) {
-  session.adapter?.kill();
-  for (const ws of session.subscribers) {
-    ws.send(JSON.stringify({ type: "closed" }));
-  }
-  sessions.delete(session.id);
-  await deleteMeta(session.id);
-}
-
-function broadcast(session: Session, msg: object) {
+function broadcast(sessionId: string, msg: object) {
   const payload = JSON.stringify(msg);
-  for (const ws of session.subscribers) {
+  const subs = subscribers.get(sessionId);
+  if (!subs) return;
+  for (const ws of subs) {
     ws.send(payload);
   }
 }
 
+// --- Wire rotom session events → forward directly to subscribers ---
+
+function wireSession(session: Session) {
+  const events = [
+    "response.created",
+    "response.in_progress",
+    "response.output_item.added",
+    "response.output_item.done",
+    "response.output_text.delta",
+    "response.output_text.done",
+    "response.completed",
+  ] as const;
+
+  for (const event of events) {
+    session.on(event, (e: object) => {
+      broadcast(session.id, e);
+    });
+  }
+
+  session.on("response.failed", (e: object) => {
+    const failEvent = e as { type: string; error?: string };
+    if (failEvent.error === "idle timeout") {
+      console.log(`killing idle session ${session.id} (${session.cli})`);
+    }
+    broadcast(session.id, e);
+  });
+}
+
 // --- Folder browsing ---
 
-async function browsePath(dirPath: string): Promise<{ path: string; entries: { name: string; isDir: boolean }[] }> {
+async function browsePath(
+  dirPath: string,
+): Promise<{ path: string; entries: { name: string; isDir: boolean }[] }> {
   const entries: { name: string; isDir: boolean }[] = [];
   try {
     const items = await readdir(dirPath);
@@ -523,11 +260,21 @@ async function browsePath(dirPath: string): Promise<{ path: string; entries: { n
   return { path: dirPath, entries };
 }
 
-// --- Server ---
+// --- Startup ---
 
+const rotom = new Rotom({ dataDir: DATA_DIR });
 await loadDefaults();
-await loadSessions();
-console.log(`loaded ${sessions.size} saved session(s)`);
+await rotom.load();
+
+// Wire existing loaded sessions
+for (const info of rotom.list()) {
+  const session = rotom.get(info.id);
+  if (session) wireSession(session);
+}
+
+console.log(`loaded ${rotom.list().length} saved session(s)`);
+
+// --- Server ---
 
 Bun.serve({
   hostname: HOST,
@@ -544,7 +291,7 @@ Bun.serve({
     return new Response("not found", { status: 404 });
   },
   websocket: {
-    open(ws: ServerWebSocket<WsData>) {},
+    open(_ws: ServerWebSocket<WsData>) {},
     message(ws: ServerWebSocket<WsData>, raw: string | Buffer) {
       try {
         const msg = JSON.parse(typeof raw === "string" ? raw : raw.toString());
@@ -554,8 +301,8 @@ Bun.serve({
             ws.send(
               JSON.stringify({
                 type: "sessions",
-                sessions: [...sessions.values()].map(sessionInfo),
-              })
+                sessions: rotom.list(),
+              }),
             );
             break;
           }
@@ -563,69 +310,110 @@ Bun.serve({
           case "create": {
             const cwd = msg.cwd || homedir();
             const cli: CLIType = msg.cli === "codex" ? "codex" : "claude";
-            createSession(cwd, cli).then((s) => {
-              ws.send(JSON.stringify({ type: "created", session: sessionInfo(s) }));
+            rotom.create({ cwd, cli }).then((session) => {
+              wireSession(session);
+              defaults = { cwd, cli };
+              saveDefaults();
+              ws.send(
+                JSON.stringify({ type: "created", session: session.info() }),
+              );
             });
             break;
           }
 
           case "open": {
-            const session = sessions.get(msg.sessionId);
+            const session = rotom.get(msg.sessionId);
             if (!session) {
-              ws.send(JSON.stringify({ type: "error", message: "session not found" }));
+              ws.send(
+                JSON.stringify({ type: "error", message: "session not found" }),
+              );
               return;
             }
             ws.data.sessionId = msg.sessionId;
-            session.subscribers.add(ws);
-            ws.send(
-              JSON.stringify({
-                type: "history",
-                messages: session.messages,
-                ready: session.ready,
-                cwd: session.cwd,
-                cli: session.cli,
-                title: session.title,
-                model: session.model,
-              })
-            );
+            getSubscribers(msg.sessionId).add(ws);
+            isGitRepo(session.cwd).then((isGit) => {
+              ws.send(
+                JSON.stringify({
+                  type: "history",
+                  messages: session.messages,
+                  cwd: session.cwd,
+                  cli: session.cli,
+                  title: session.title,
+                  isGit,
+                }),
+              );
+            });
             break;
           }
 
           case "message": {
-            const session = sessions.get(msg.sessionId);
+            const session = rotom.get(msg.sessionId);
             if (!session) {
-              ws.send(JSON.stringify({ type: "error", message: "session not found" }));
+              ws.send(
+                JSON.stringify({ type: "error", message: "session not found" }),
+              );
               return;
             }
-            sendMessage(session, msg.text);
+            session.send(msg.text);
             break;
           }
 
           case "delete": {
-            const session = sessions.get(msg.sessionId);
-            if (session) destroySession(session);
-            ws.send(JSON.stringify({ type: "deleted", sessionId: msg.sessionId }));
+            const session = rotom.get(msg.sessionId);
+            if (session) {
+              const subs = subscribers.get(msg.sessionId);
+              if (subs) {
+                for (const sub of subs) {
+                  sub.send(JSON.stringify({ type: "closed" }));
+                }
+                subscribers.delete(msg.sessionId);
+              }
+              rotom.destroy(msg.sessionId);
+            }
+            ws.send(
+              JSON.stringify({ type: "deleted", sessionId: msg.sessionId }),
+            );
             break;
           }
 
           case "leave": {
-            const session = sessions.get(msg.sessionId);
-            if (session) {
-              session.subscribers.delete(ws);
+            const subs = subscribers.get(msg.sessionId);
+            if (subs) {
+              subs.delete(ws);
               ws.data.sessionId = undefined;
-              if (session.subscribers.size === 0) {
-                session.adapter?.kill();
-                session.adapter = null;
-                session.ready = false;
+              if (subs.size === 0) {
+                subscribers.delete(msg.sessionId);
               }
             }
+            break;
+          }
+
+          case "git_diff": {
+            const session = rotom.get(msg.sessionId);
+            if (!session) {
+              ws.send(
+                JSON.stringify({ type: "error", message: "session not found" }),
+              );
+              return;
+            }
+            getGitDiff(session.cwd).then((result) => {
+              ws.send(
+                JSON.stringify({
+                  type: "git_diff_result",
+                  stats: result.stats,
+                  files: result.files,
+                }),
+              );
+            });
             break;
           }
 
           case "browse": {
             const dir = msg.path || defaults.cwd;
             browsePath(dir).then((result) => {
-              ws.send(JSON.stringify({ type: "browse_result", ...result, defaults }));
+              ws.send(
+                JSON.stringify({ type: "browse_result", ...result, defaults }),
+              );
             });
             break;
           }
@@ -636,36 +424,16 @@ Bun.serve({
     },
     close(ws: ServerWebSocket<WsData>) {
       if (ws.data.sessionId) {
-        const session = sessions.get(ws.data.sessionId);
-        if (session) {
-          session.subscribers.delete(ws);
-          if (session.subscribers.size === 0) {
-            session.adapter?.kill();
-            session.adapter = null;
-            session.ready = false;
+        const subs = subscribers.get(ws.data.sessionId);
+        if (subs) {
+          subs.delete(ws);
+          if (subs.size === 0) {
+            subscribers.delete(ws.data.sessionId);
           }
         }
       }
     },
   },
 });
-
-// --- Idle session cleanup (5 min) ---
-
-const IDLE_TIMEOUT = 5 * 60 * 1000;
-
-setInterval(() => {
-  const now = Date.now();
-  for (const session of sessions.values()) {
-    if (!session.adapter) continue;
-    if (now - session.lastActivity > IDLE_TIMEOUT) {
-      console.log(`killing idle session ${session.id} (${session.cli})`);
-      session.adapter.kill();
-      session.adapter = null;
-      session.ready = false;
-      broadcast(session, { type: "idle" });
-    }
-  }
-}, 60_000);
 
 console.log(`meloetta running at http://${HOST}:${PORT}`);
