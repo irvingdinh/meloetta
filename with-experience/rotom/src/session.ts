@@ -34,7 +34,6 @@ export class Session extends EventEmitter {
   private _adapter: InternalAdapter | null = null;
   private _buffer = "";
   private _textItemEmitted = false;
-  private _lastActivity: number;
 
   constructor(options: SessionOptions) {
     super();
@@ -47,7 +46,6 @@ export class Session extends EventEmitter {
     this._cliSessionId = options.meta.cliSessionId;
     this._dataDir = options.dataDir;
     this._adapterOptions = options.adapterOptions;
-    this._lastActivity = Date.now();
   }
 
   get title(): string {
@@ -62,12 +60,7 @@ export class Session extends EventEmitter {
     return this._adapter !== null;
   }
 
-  get lastActivity(): number {
-    return this._lastActivity;
-  }
-
   send(text: string): void {
-    this._lastActivity = Date.now();
     this._messages.push({ role: "user", text });
     this._save();
 

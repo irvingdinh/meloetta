@@ -221,6 +221,7 @@ function wireSession(session: Session) {
     "response.output_text.delta",
     "response.output_text.done",
     "response.completed",
+    "response.failed",
   ] as const;
 
   for (const event of events) {
@@ -228,14 +229,6 @@ function wireSession(session: Session) {
       broadcast(session.id, e);
     });
   }
-
-  session.on("response.failed", (e: object) => {
-    const failEvent = e as { type: string; error?: string };
-    if (failEvent.error === "idle timeout") {
-      console.log(`killing idle session ${session.id} (${session.cli})`);
-    }
-    broadcast(session.id, e);
-  });
 }
 
 // --- Folder browsing ---

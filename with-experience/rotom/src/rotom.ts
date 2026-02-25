@@ -7,17 +7,12 @@ import type {
   SessionInfo,
 } from "./types.js";
 
-const DEFAULT_IDLE_TIMEOUT = 5 * 60 * 1000; // 5 minutes
-
 export class Rotom {
   private _dataDir: string;
-  private _idleTimeout: number;
   private _sessions = new Map<string, Session>();
-  private _idleTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: RotomOptions) {
     this._dataDir = options.dataDir;
-    this._idleTimeout = options.idleTimeout ?? DEFAULT_IDLE_TIMEOUT;
   }
 
   async load(): Promise<void> {
@@ -33,7 +28,6 @@ export class Rotom {
       });
       this._sessions.set(meta.id, session);
     }
-    this._startIdleCleanup();
   }
 
   async create(options: CreateSessionOptions): Promise<Session> {
@@ -56,7 +50,6 @@ export class Rotom {
 
     this._sessions.set(id, session);
     await saveMeta(this._dataDir, session.toMeta());
-    this._startIdleCleanup();
     return session;
   }
 
@@ -77,36 +70,8 @@ export class Rotom {
   }
 
   close(): void {
-    if (this._idleTimer) {
-      clearInterval(this._idleTimer);
-      this._idleTimer = null;
-    }
     for (const session of this._sessions.values()) {
       session.kill();
-    }
-  }
-
-  private _startIdleCleanup(): void {
-    if (this._idleTimer) return;
-    if (this._idleTimeout <= 0) return;
-
-    this._idleTimer = setInterval(() => {
-      const now = Date.now();
-      for (const session of this._sessions.values()) {
-        if (!session.alive) continue;
-        if (now - session.lastActivity > this._idleTimeout) {
-          session.kill();
-          session.emit("response.failed", {
-            type: "response.failed" as const,
-            error: "idle timeout",
-          });
-        }
-      }
-    }, 60_000);
-
-    // Don't keep the process alive just for idle cleanup
-    if (this._idleTimer && typeof this._idleTimer === "object" && "unref" in this._idleTimer) {
-      this._idleTimer.unref();
     }
   }
 }

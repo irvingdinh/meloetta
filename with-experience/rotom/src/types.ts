@@ -31,7 +31,6 @@ export interface SessionInfo {
 
 export interface RotomOptions {
   dataDir: string;
-  idleTimeout?: number; // ms, default 300_000 (5 min)
 }
 
 export interface CreateSessionOptions {
