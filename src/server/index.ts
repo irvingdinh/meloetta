@@ -18,7 +18,8 @@ import { handleStatic } from "./static.js";
 
 const HOST = process.env.HOST || "127.0.0.1";
 const PORT = parseInt(process.env.PORT || "16480");
-const DATA_DIR = join(homedir(), ".meloetta", "sessions");
+const DATA_DIR =
+  process.env.MELOETTA_DATA_DIR || join(homedir(), ".meloetta", "sessions");
 
 const rotom = new Rotom({ dataDir: DATA_DIR });
 const sse = new SSEManager();
