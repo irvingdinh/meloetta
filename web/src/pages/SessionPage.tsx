@@ -10,6 +10,7 @@ import { MessageBubble } from "@/components/MessageBubble";
 import { useSessionEvents } from "@/hooks/useSessionEvents";
 import { getSession, sendMessage } from "@/lib/api";
 import type { Message, RotomEvent } from "@/lib/types";
+import { pathLeaf } from "@/lib/utils";
 
 interface Props {
   sessionId: string;
@@ -18,7 +19,6 @@ interface Props {
 }
 
 export function SessionPage({ sessionId, onBack, onShowDiff }: Props) {
-  const [title, setTitle] = useState("loading...");
   const [cwd, setCwd] = useState("");
   const [cli, setCli] = useState("");
   const [isGit, setIsGit] = useState(false);
@@ -27,28 +27,38 @@ export function SessionPage({ sessionId, onBack, onShowDiff }: Props) {
   const [streamBuffer, setStreamBuffer] = useState("");
   const [activity, setActivity] = useState("");
   const [inputValue, setInputValue] = useState("");
+  const [showMore, setShowMore] = useState(false);
 
   const msgsRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const moreRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let cancelled = false;
     getSession(sessionId)
       .then((data) => {
         if (cancelled) return;
-        setTitle(data.title || sessionId);
         setCwd(data.cwd);
         setCli(data.cli);
         setIsGit(data.isGit);
         setMessages(data.messages);
       })
-      .catch(() => {
-        if (!cancelled) setTitle("error loading session");
-      });
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
   }, [sessionId]);
+
+  useEffect(() => {
+    if (!showMore) return;
+    const handleClick = (e: MouseEvent) => {
+      if (moreRef.current && !moreRef.current.contains(e.target as Node)) {
+        setShowMore(false);
+      }
+    };
+    document.addEventListener("click", handleClick, true);
+    return () => document.removeEventListener("click", handleClick, true);
+  }, [showMore]);
 
   const handleEvent = useCallback((event: RotomEvent) => {
     switch (event.type) {
@@ -137,31 +147,45 @@ export function SessionPage({ sessionId, onBack, onShowDiff }: Props) {
 
   return (
     <div className="flex h-dvh flex-col">
-      <div className="flex flex-wrap items-center gap-3 border-b border-border px-4 py-3">
-        <span
+      <div className="flex items-center gap-2 border-b border-border px-2 py-1.5">
+        <button
           onClick={onBack}
-          className="cursor-pointer text-text-faint hover:text-text-bright max-sm:flex max-sm:min-h-11 max-sm:min-w-11 max-sm:items-center"
+          className="flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center text-text-faint hover:text-text-bright"
         >
-          &larr; back
-        </span>
-        <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-text-dim">
-          {title}
-        </span>
-        <span className="border border-border-muted px-1.5 py-px text-[11px] text-text-faint">
-          {cli}
-        </span>
-        {isGit && (
+          &larr;
+        </button>
+        <div className="flex min-w-0 flex-1 items-center gap-1.5 text-xs text-text-faint">
+          <span className="shrink-0">{pathLeaf(cwd)}</span>
+          <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-text-ghost">
+            {cwd}
+          </span>
+        </div>
+        <div ref={moreRef} className="relative shrink-0">
           <button
-            onClick={onShowDiff}
-            className="cursor-pointer border border-border-strong bg-bg-muted px-2 py-1 font-mono text-xs text-text-muted hover:bg-bg-elevated hover:text-text-bright"
+            onClick={() => setShowMore((v) => !v)}
+            className="flex h-8 w-8 cursor-pointer items-center justify-center text-text-faint hover:text-text-bright"
           >
-            diff
+            &#8942;
           </button>
-        )}
-        <span className="w-full text-[11px] text-text-ghost max-sm:order-10 sm:hidden">
-          {cwd}
-        </span>
-        <span className="text-[11px] text-text-ghost max-sm:hidden">{cwd}</span>
+          {showMore && (
+            <div className="absolute right-0 top-full z-10 mt-1 flex flex-col gap-1 border border-border-strong bg-bg-muted p-2">
+              <span className="whitespace-nowrap border border-border-muted px-1.5 py-px text-[11px] text-text-faint">
+                {cli}
+              </span>
+              {isGit && (
+                <button
+                  onClick={() => {
+                    setShowMore(false);
+                    onShowDiff();
+                  }}
+                  className="cursor-pointer whitespace-nowrap border border-border-strong bg-bg-subtle px-2 py-1 text-left font-mono text-xs text-text-muted hover:bg-bg-elevated hover:text-text-bright"
+                >
+                  diff
+                </button>
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       <div ref={msgsRef} className="flex-1 overflow-y-auto p-4 max-sm:p-3">
@@ -181,10 +205,6 @@ export function SessionPage({ sessionId, onBack, onShowDiff }: Props) {
             streaming
           />
         )}
-      </div>
-
-      <div className="px-4 py-1 text-[11px] text-text-ghost">
-        {streaming ? "streaming..." : ""}
       </div>
 
       <div className="flex gap-2 border-t border-border px-4 py-3 max-sm:px-3 max-sm:py-2">

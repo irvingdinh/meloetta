@@ -5,3 +5,9 @@ export function ago(ts: number): string {
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
   return `${Math.floor(s / 86400)}d ago`;
 }
+
+export function pathLeaf(p: string): string {
+  const trimmed = p.endsWith("/") ? p.slice(0, -1) : p;
+  const last = trimmed.lastIndexOf("/");
+  return last === -1 ? trimmed : trimmed.slice(last + 1) || "/";
+}
