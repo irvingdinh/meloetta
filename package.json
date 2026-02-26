@@ -1,0 +1,48 @@
+{
+  "name": "meloetta",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Local, browser-based session manager for AI coding assistants",
+  "keywords": [
+    "ai",
+    "claude",
+    "codex",
+    "session",
+    "manager"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/irvingdinh/meloetta.git"
+  },
+  "license": "MIT",
+  "bin": {
+    "meloetta": "./bin/meloetta.ts"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "dist/web/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "bun --hot src/server/index.ts",
+    "start": "bun src/server/index.ts",
+    "test": "bun test src/",
+    "lint": "eslint . && prettier --check .",
+    "lint:fix": "eslint . --fix && prettier --write ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/bun": "latest",
+    "eslint": "^10.0.2",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-simple-import-sort": "^12.1.1",
+    "prettier": "3.8.1",
+    "typescript-eslint": "^8.56.1"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
